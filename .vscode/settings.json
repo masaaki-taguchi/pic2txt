@@ -1,0 +1,18 @@
+{
+    "[has]": {
+        "files.encoding": "shiftjis"
+    },
+    "[mac]": {
+        "files.encoding": "shiftjis"
+    },
+    "[x68k]": {
+        "files.encoding": "shiftjis"
+    },
+    "files.autoGuessEncoding": true,
+    "editor.tabSize": 8,
+    "editor.quickSuggestions": {
+        "comments": "off",
+        "strings": "off",
+        "other": "off"
+    }
+}

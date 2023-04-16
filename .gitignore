@@ -1,0 +1,6 @@
+src/_build/
+src/*.o
+work/
+backup/
+PIC2TXT.X
+

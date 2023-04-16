@@ -1,0 +1,1388 @@
+*
+*	PIC to Text converter 'PIC2TXT.R' version 1.00
+*
+*	Programmed by M.Taguchi.
+*
+
+	.nlist
+
+	include	iocscall.mac
+	include	doscall.mac
+	include apicglib.mac
+
+PRINT	macro	data
+	lea.l	data(pc),a1
+	IOCS	_B_PRINT
+	endm
+
+THRESHOLD		equ	31
+
+	.list
+
+	.offset	0
+* sspのワーク
+ssp_work:		ds.l	1
+
+* オプション状態
+direct_load_mode:	ds.b	1
+text_file_load_mode:	ds.b	1
+text_file_save_mode:	ds.b	1
+floyd_steinberg_mode:	ds.b	1
+
+* 共通ファイル関係ワーク
+file_point:		ds.l	1
+file_size:		ds.l	1
+pic_file_path:		ds.b	255
+text_file_load_path:	ds.b	255
+text_file_save_path:	ds.b	255
+
+* PIC展開時使用ワーク
+picwork_point:		ds.l	1
+gram_point:		ds.l	1
+
+* テキスト変換使用ワーク
+text_point:		ds.l	1
+text_color_backup:	ds.w	16
+
+* 変換アルゴリズム1用ワーク
+diffusion_work_1:	ds.b	1024+2
+diffusion_work_2:	ds.b	1024+2
+
+* 変換アルゴリズム2用(Floyd Steinberg)ワーク
+diffusion_work_r:	ds.l	(512+2)*2
+diffusion_work_g:	ds.l	(512+2)*2
+diffusion_work_b:	ds.l	(512+2)*2
+r_work:			ds.w	1
+g_work:			ds.w	1
+b_work:			ds.w	1
+text_write_counter:	ds.b	1
+text_1_work:		ds.b	1
+text_2_work:		ds.b	1
+text_3_work:		ds.b	1
+text_4_work:		ds.b	1
+selected_palette	ds.w	1
+text_bit_table		ds.l	16*8
+
+apicginfo:
+pic_start_x:		ds.l	1
+pic_start_y:		ds.l	1
+pic_size_x:		ds.l	1
+pic_size_y:		ds.l	1
+pic_color:		ds.l	1
+
+WORK_SIZE:
+	.text
+
+	.xref	_M_APICLOAD
+
+*-----------------------------------------------
+*
+*	コマンドラインの解析
+*
+*-----------------------------------------------
+boot:
+	lea.l	mysp(pc),sp
+	bsr	initialize
+
+	move.b	#1,direct_load_mode(a6)
+	move.b	#0,text_file_load_mode(a6)
+	move.b	#0,text_file_save_mode(a6)
+	move.b	#0,floyd_steinberg_mode(a6)
+
+	lea.l	pic_file_path(a6),a4
+	tst.b	(a2)+
+	beq	analyze_end
+analyze_loop:
+	move.b	(a2)+,d0
+	beq	analyze_end
+	cmpi.b	#' ',d0
+	beq	analyze_loop
+	cmpi.b	#$09,d0
+	beq	analyze_loop
+	cmpi.b	#'-',d0
+	beq	@f
+	cmpi.b	#'/',d0
+	beq	@f
+	move.b	d0,(a4)+
+	bra	analyze_loop
+@@:	move.b	(a2)+,d0
+	beq	help
+	andi.b	#$df,d0
+	cmpi.b	#'D',d0
+	beq	enable_dicrect_load_mode
+	cmpi.b	#'L',d0
+	beq	enable_text_file_load_mode
+	cmpi.b	#'S',d0
+	beq	enable_text_file_save_mode
+	cmpi.b	#'F',d0
+	beq	enable_floyd_steinberg_mode
+	bra	help
+analyze_end:
+	clr.b	(a4)
+	tst.b	text_file_load_mode(a6)
+	bne	@f
+	lea.l	pic_file_path(a6),a4
+	tst.b	(a4)
+	beq	help
+	bra	main
+@@:	move.b	#0,text_file_save_mode(a6)
+	bra	main
+
+enable_dicrect_load_mode:
+	move.b	#1,direct_load_mode(a6)
+	bra	analyze_loop
+enable_text_file_load_mode:
+	lea.l	text_file_load_path(a6),a5
+	bsr	copy_text_file_path
+	move.b	#1,text_file_load_mode(a6)
+	bra	analyze_loop
+enable_text_file_save_mode:
+	lea.l	text_file_save_path(a6),a5
+	bsr	copy_text_file_path
+	move.b	#1,text_file_save_mode(a6)
+	bra	analyze_loop
+enable_floyd_steinberg_mode:
+	move.b	#1,floyd_steinberg_mode(a6)
+	bra	analyze_loop
+
+copy_text_file_path:
+	move.b	(a2)+,d0
+	beq	help
+	cmpi.b	#' ',d0
+	bne	copy_text_file_path
+	move.b	(a2)+,d0
+	beq	help
+	cmpi.b	#'-',d0
+	beq	help
+	cmpi.b	#'/',d0
+	beq	help
+@@:	move.b	d0,(a5)+
+	move.b	(a2)+,d0
+	beq	@f
+	cmpi.b	#'-',d0
+	beq	@f
+	cmpi.b	#'/',d0
+	beq	@f
+	cmpi.b	#' ',d0
+	beq	@f
+	bra	@b
+@@:	clr.b	(a5)
+	suba.l	#1,a2
+	rts
+
+*-----------------------------------------------
+*
+*	メイン処理
+*
+*-----------------------------------------------
+main:
+	tst.b	text_file_load_mode(a6)
+	bne	text_file_load
+	bsr	read_pic_file
+	bsr	graphic_to_text
+	bsr	output_result
+	bra	exit
+text_file_load:
+	bsr	read_text_file
+	bsr	output_result
+exit:
+	bsr	finalize
+	movea.l	ssp_work(a6),a1
+	IOCS	_B_SUPER
+	DOS	_EXIT
+
+*-----------------------------------------------
+*
+*	初期化
+*
+*-----------------------------------------------
+initialize:
+	lea.l	16(a0),a0
+	suba.l	a0,a1
+	move.l	a1,-(sp)
+	move.l	a0,-(sp)
+	DOS	_SETBLOCK		*最小限のメモリ確保
+	addq.l	#8,sp
+
+	lea.l	work_top(pc),a6
+	lea.l	ssp_work(a6),a0		*確保したワークメモリをクリア
+	move.w	#WORK_SIZE/2-1,d0
+@@:	clr.w	(a0)+
+	dbra	d0,@b
+
+	suba.l	a1,a1
+	IOCS	_B_SUPER
+	move.l	d0,ssp_work(a6)
+	rts
+
+*-----------------------------------------------
+*
+*	PICファイルを読み込み
+*
+*-----------------------------------------------
+read_pic_file:
+	move.w	#2,-(sp)
+	pea.l	pic_file_path(a6)
+	DOS	_OPEN
+	addq.l	#6,sp
+	move.l	d0,d1
+	tst.l	d0
+	bmi	error_file_1
+
+	move.w	#2,-(sp)
+	clr.l	-(sp)
+	move.w	d1,-(sp)
+	DOS	_SEEK
+	addq.l	#8,sp
+	move.l	d0,d2
+	move.l	d2,file_size(a6)
+
+	move.w	#0,-(sp)
+	clr.l	-(sp)
+	move.w	d1,-(sp)
+	DOS	_SEEK
+	addq.l	#8,sp
+
+	move.l	d2,-(sp)
+	DOS	_MALLOC
+	addq.l	#4,sp
+	tst.l	d0
+	bmi	error_memory
+	move.l	d0,file_point(a6)
+
+	move.l	file_size(a6),-(sp)
+	move.l	d0,-(sp)
+	move.w	d1,-(sp)
+	DOS	_READ
+	lea.l	10(sp),sp
+	tst.l	d0
+	bmi	error_file_2
+
+	move.w	d1,-(sp)
+	DOS	_CLOSE
+	addq.l	#2,sp
+
+	move.l	#524288,-(sp)		*PICを展開するバッファ
+	DOS	_MALLOC
+	addq.l	#4,sp
+	tst.l	d0
+	bmi	error_memory
+	move.l	d0,gram_point(a6)
+
+	movea.l	d0,a0
+	move.w	#(524288)/32-1,d0
+@@:	clr.l	(a0)+			*バッファ初期化
+	clr.l	(a0)+
+	clr.l	(a0)+
+	clr.l	(a0)+
+	clr.l	(a0)+
+	clr.l	(a0)+
+	clr.l	(a0)+
+	clr.l	(a0)+
+	dbra	d0,@b
+
+	move.l	#524288,-(sp)		*PIC展開に使用するワーク
+	DOS	_MALLOC
+	addq.l	#4,sp
+	tst.l	d0
+	bmi	error_memory
+	move.l	d0,picwork_point(a6)
+	move.l	picwork_point(a6),-(sp)
+	move.l	#APF_NOPRC|APF_NOADJUST|APF_NOPRFC|APF_NOCLRBUF|APF_NOINITCRT,-(sp)
+	move.l	file_size(a6),-(sp)
+	move.l	file_point(a6),-(sp)
+	move.l	#0,-(sp)
+	move.l	#0,-(sp)
+	pea.l	apicginfo(a6)
+	move.l	gram_point(a6),-(sp)
+	bsr	_M_APICLOAD
+	lea.l	4*8(sp),sp
+	tst.l	d0
+	bmi	error_picload
+
+	cmpi.l	#$8000,pic_color(a6)
+	beq	@f
+	cmpi.l	#$10000,pic_color(a6)
+	beq	@f
+	bra	error_piccolor
+
+@@:	move.l	file_point(a6),a0
+	bsr	mfree
+	clr.l	file_point(a6)
+
+	move.l	picwork_point(a6),a0
+	bsr	mfree
+	clr.l	picwork_point(a6)
+
+	rts
+
+*-----------------------------------------------
+*
+*	65536色グラフィック -> 8色テキスト変換
+*
+*-----------------------------------------------
+graphic_to_text:
+	tst.b	floyd_steinberg_mode(a6)
+	bne	graphic_to_text_fs
+
+	move.l	#128*512*3,-(sp)	*テキスト3プレーン分
+	DOS	_MALLOC
+	addq.l	#4,sp
+	tst.l	d0
+	bmi	error_memory
+	move.l	d0,text_point(a6)
+
+	bsr	init_diffusion_work
+	movea.l	gram_point(a6),a0
+	move.l	a0,a4
+	movea.l	text_point(a6),a1
+	lea.l	diffusion_work_1+1(a6),a2
+	lea.l	diffusion_work_2+1(a6),a3
+	moveq.l	#0,d1
+	moveq.l	#0,d5
+	move.w	#512/2-1,d7
+	move.w	#512-1,d6
+blue_loop_1:
+	move.w	(a0)+,d0
+	lsr.w	#1,d0
+	andi.b	#$1f,d0
+	add.b	d0,d1
+	bsr	diffusion_sub_1
+
+	moveq.l	#0,d2
+	cmp.b	#THRESHOLD,d1
+	bcs	@f
+	sub.b	#THRESHOLD,d1
+	moveq.l	#$ff,d2
+@@:	addq.w	#1,d2
+	roxl.b	#1,d4
+	lsr.b	#1,d1
+	move.b	d1,(a2)+
+	addq.w	#1,d5
+	andi.w	#$7,d5
+	bne	@f
+	move.b	d4,(a1)+
+@@:	dbra	d6,blue_loop_1
+
+	lea.l	diffusion_work_1+1(a6),a2
+	lea.l	diffusion_work_2+1(a6),a3
+	moveq.l	#0,d1
+	moveq.l	#0,d5
+	move.w	#512-1,d6
+blue_loop_2:
+	move.w	(a0)+,d0
+	lsr.w	#1,d0
+	andi.b	#$1f,d0
+	add.b	d0,d1
+	bsr	diffusion_sub_2
+
+	moveq.l	#0,d2
+	cmp.b	#THRESHOLD,d1
+	bcs	@f
+	sub.b	#THRESHOLD,d1
+	moveq.l	#$ff,d2
+@@:	addq.w	#1,d2
+	roxl.b	#1,d4
+	lsr.b	#1,d1
+	move.b	d1,(a3)+
+	addq.w	#1,d5
+	andi.w	#$7,d5
+	bne	@f
+	move.b	d4,(a1)+
+@@:	dbra	d6,blue_loop_2
+	lea.l	diffusion_work_1+1(a6),a2
+	lea.l	diffusion_work_2+1(a6),a3
+	move.w	#512-1,d6
+	lea.l	2048(a4),a4
+	move.l	a4,a0
+	dbra	d7,blue_loop_1
+
+	bsr	init_diffusion_work
+	movea.l	gram_point(a6),a0
+	move.l	a0,a4
+	lea.l	diffusion_work_1+1(a6),a2
+	lea.l	diffusion_work_2+1(a6),a3
+	moveq.l	#0,d1
+	moveq.l	#0,d5
+	move.w	#512/2-1,d7
+	move.w	#512-1,d6
+red_loop_1:
+	move.w	(a0)+,d0
+	lsr.w	#6,d0
+	andi.b	#$1f,d0
+	add.b	d0,d1
+	bsr	diffusion_sub_1
+
+	moveq.l	#0,d2
+	cmp.b	#THRESHOLD,d1
+	bcs	@f
+	sub.b	#THRESHOLD,d1
+	moveq.l	#$ff,d2
+@@:	addq.w	#1,d2
+	roxl.b	#1,d4
+	lsr.b	#1,d1
+	move.b	d1,(a2)+
+	addq.w	#1,d5
+	andi.w	#$7,d5
+	bne	@f
+	move.b	d4,(a1)+
+@@:	dbra	d6,red_loop_1
+
+	lea.l	diffusion_work_1+1(a6),a2
+	lea.l	diffusion_work_2+1(a6),a3
+	moveq.l	#0,d1
+	moveq.l	#0,d5
+	move.w	#512-1,d6
+red_loop_2:
+	move.w	(a0)+,d0
+	lsr.w	#6,d0
+	andi.b	#$1f,d0
+	add.b	d0,d1
+	bsr	diffusion_sub_2
+
+	moveq.l	#0,d2
+	cmp.b	#THRESHOLD,d1
+	bcs	@f
+	sub.b	#THRESHOLD,d1
+	moveq.l	#$ff,d2
+@@:	addq.w	#1,d2
+	roxl.b	#1,d4
+	lsr.b	#1,d1
+	move.b	d1,(a3)+
+	addq.w	#1,d5
+	andi.w	#$7,d5
+	bne	@f
+	move.b	d4,(a1)+
+@@:	dbra	d6,red_loop_2
+	lea.l	diffusion_work_1+1(a6),a2
+	lea.l	diffusion_work_2+1(a6),a3
+	move.w	#512-1,d6
+	lea.l	2048(a4),a4
+	move.l	a4,a0
+	dbra	d7,red_loop_1
+
+	bsr	init_diffusion_work
+	movea.l	gram_point(a6),a0
+	move.l	a0,a4
+	lea.l	diffusion_work_1+1(a6),a2
+	lea.l	diffusion_work_2+1(a6),a3
+	moveq.l	#0,d1
+	moveq.l	#0,d5
+	move.w	#512/2-1,d7
+	move.w	#512-1,d6
+green_loop_1:
+	move.w	(a0)+,d0
+	rol.w	#5,d0
+	andi.b	#$1f,d0
+	add.b	d0,d1
+	bsr	diffusion_sub_1
+
+	moveq.l	#0,d2
+	cmp.b	#THRESHOLD,d1
+	bcs	@f
+	sub.b	#THRESHOLD,d1
+	moveq.l	#$ff,d2
+@@:	addq.w	#1,d2
+	roxl.b	#1,d4
+	lsr.b	#1,d1
+	move.b	d1,(a2)+
+	addq.w	#1,d5
+	andi.w	#$7,d5
+	bne	@f
+	move.b	d4,(a1)+
+@@:	dbra	d6,green_loop_1
+
+	lea.l	diffusion_work_1+1(a6),a2
+	lea.l	diffusion_work_2+1(a6),a3
+	moveq.l	#0,d1
+	moveq.l	#0,d5
+	move.w	#512-1,d6
+green_loop_2:
+	move.w	(a0)+,d0
+	rol.w	#5,d0
+	andi.b	#$1f,d0
+	add.b	d0,d1
+	bsr	diffusion_sub_2
+
+	moveq.l	#0,d2
+	cmp.b	#THRESHOLD,d1
+	bcs	@f
+	sub.b	#THRESHOLD,d1
+	moveq.l	#$ff,d2
+@@:	addq.w	#1,d2
+	roxl.b	#1,d4
+	lsr.b	#1,d1
+	move.b	d1,(a3)+
+	addq.w	#1,d5
+	andi.w	#$7,d5
+	bne	@f
+	move.b	d4,(a1)+
+@@:	dbra	d6,green_loop_2
+	lea.l	diffusion_work_1+1(a6),a2
+	lea.l	diffusion_work_2+1(a6),a3
+	move.w	#512-1,d6
+	lea.l	2048(a4),a4
+	move.l	a4,a0
+	dbra	d7,green_loop_1
+	rts
+
+init_diffusion_work:
+	lea.l	diffusion_work_1(a6),a2
+	lea.l	diffusion_work_2(a6),a3
+	move.w	#(1024+2)/2-1,d0
+@@:	clr.w	(a2)+
+	clr.w	(a3)+
+	dbra	d0,@b
+	rts
+
+diffusion_sub_1:
+	move.b	1(a3),d2
+	lsr.b	#2,d2
+	add.b	d2,d1
+	move.b	-1(a3),d2
+	lsr.b	#3,d2
+	add.b	d2,d1
+	move.b	(a3),d2
+	lsr.b	#3,d2
+	add.b	d2,d1
+	lsl.b	#3,d2
+	move.b	(a3)+,d3
+	sub.b	d2,d3
+	add.b	d3,d1
+	rts
+
+diffusion_sub_2:
+	move.b	1(a2),d2
+	lsr.b	#2,d2
+	add.b	d2,d1
+	move.b	-1(a2),d2
+	lsr.b	#3,d2
+	add.b	d2,d1
+	move.b	(a2),d2
+	lsr.b	#3,d2
+	add.b	d2,d1
+	lsl.b	#3,d2
+	move.b	(a2)+,d3
+	sub.b	d2,d3
+	add.b	d3,d1
+	rts
+
+*-----------------------------------------------
+*
+*	65536色グラフィック -> 16色テキスト変換
+*	(Floyd Steinberg dithering)
+*
+*-----------------------------------------------
+graphic_to_text_fs:
+	move.l	#128*512*4,-(sp)	*テキスト4プレーン分
+	DOS	_MALLOC
+	addq.l	#4,sp
+	tst.l	d0
+	bmi	error_memory
+	move.l	d0,text_point(a6)
+
+	lea.l	text_bit_table(a6),a0
+	moveq.l	#0,d0
+	moveq.l	#0,d3
+	moveq.l	#8-1,d1
+make_text_bit_table:
+	moveq.l	#16-1,d2
+	lea.l	text_table(pc),a1
+@@:	move.l	(a1)+,d4
+	lsr.l	d3,d4
+	move.l	d4,(a0)+
+	dbra	d2,@b
+	addq.l	#1,d3
+	dbra	d1,make_text_bit_table
+
+	movea.l	gram_point(a6),a0
+	movea.l	text_point(a6),a1
+
+*	d0: 破壊
+*	d1: 破壊
+*	d2: 破壊
+*	d4: 選択したパレット
+*	d5: テキスト書き込み用ワーク
+*	d6: Xカウンタ
+*	d7: Yカウンタ
+*	a0: GRAMワークアドレス
+*	a1: TRAMワークアドレス
+*	a2: R用ワークアドレス
+*	a3: G用ワークアドレス
+*	a4: B用ワークアドレス
+*	a5: 破壊
+*	a6: プログラムワークアドレス
+
+	lea.l	diffusion_work_r(a6),a2
+	move.w	#(512+2)*2-1,d0
+@@:	clr.l	(a2)+
+	dbra	d0,@b
+
+	lea.l	diffusion_work_g(a6),a2
+	move.w	#(512+2)*2-1,d0
+@@:	clr.l	(a2)+
+	dbra	d0,@b
+
+	lea.l	diffusion_work_b(a6),a2
+	move.w	#(512+2)*2-1,d0
+@@:	clr.l	(a2)+
+	dbra	d0,@b
+
+	move.w	#512-1,d7
+next_line_loop:
+	move.w	#512-1,d6
+	moveq.l	#0,d0
+	moveq.l	#0,d1
+	moveq.l	#0,d2
+	moveq.l	#0,d5
+	lea.l	diffusion_work_r(a6),a2
+	lea.l	diffusion_work_g(a6),a3
+	lea.l	diffusion_work_b(a6),a4
+	clr.w	text_write_counter(a6)
+next_dot_loop:
+	move.w	(a0)+,d0
+	move.w	d0,d1			*R
+	lsr.w	#6,d1
+	andi.w	#$1f,d1
+	move.l	(a2),d2
+	swap.w	d2
+	add.w	d2,d1
+	cmpi.w	#$1f,d1
+	ble	@f
+	moveq.l	#$1f,d1
+@@:	tst.w	d1
+	bpl	@f
+	moveq.l	#0,d1
+@@:	move.w	d1,r_work(a6)
+
+	move.w	d0,d1			*G
+	rol.w	#5,d1
+	andi.w	#$1f,d1
+	move.l	(a3),d2
+	swap.w	d2
+	add.w	d2,d1
+	cmpi.w	#$1f,d1
+	ble	@f
+	moveq.l	#$1f,d1
+@@:	tst.w	d1
+	bpl	@f
+	moveq.l	#0,d1
+@@:	move.w	d1,g_work(a6)
+
+	move.w	d0,d1			*B
+	lsr.w	#1,d1
+	andi.w	#$1f,d1
+	move.l	(a4),d2
+	swap.w	d2
+	add.w	d2,d1
+	cmpi.w	#$1f,d1
+	ble	@f
+	moveq.l	#$1f,d1
+@@:	tst.w	d1
+	bpl	@f
+	moveq.l	#0,d1
+@@:	move.w	d1,b_work(a6)
+
+	move.l	#(31*31*3)+1,d3
+	moveq.l	#0,d4
+find_closed_palette:
+	moveq.l	#0,d0
+	move.w	r_work(a6),d0
+	lea.l	r_colors(pc),a5
+	sub.w	(a5,d4),d0
+	muls.w	d0,d0
+	moveq.l	#0,d1
+	move.w	g_work(a6),d1
+	lea.l	g_colors(pc),a5
+	sub.w	(a5,d4),d1
+	muls.w	d1,d1
+	moveq.l	#0,d2
+	move.w	b_work(a6),d2
+	lea.l	b_colors(pc),a5
+	sub.w	(a5,d4),d2
+	muls.w	d2,d2
+	add.l	d1,d0
+	add.l	d2,d0
+
+	cmp.l	d0,d3
+	ble	@f
+	move.l	d0,d3
+	move.w	d4,selected_palette(a6)
+@@:	addq.w	#2,d4
+	cmpi.w	#32,d4
+	bne	find_closed_palette
+
+	move.w	selected_palette(a6),d4
+	moveq.l	#0,d0
+	move.w	r_work(a6),d0
+	lea.l	r_colors(pc),a5
+	sub.w	(a5,d4),d0
+	moveq.l	#0,d1
+	move.w	g_work(a6),d1
+	lea.l	g_colors(pc),a5
+	sub.w	(a5,d4),d1
+	moveq.l	#0,d2
+	move.w	b_work(a6),d2
+	lea.l	b_colors(pc),a5
+	sub.w	(a5,d4),d2
+
+	tst.w	d6
+	beq	@f		*X = 511の場合
+	moveq.l	#0,d3
+	move.w	d0,d3
+	add.w	d3,d3		*7倍
+	add.w	d3,d3
+	add.w	d0,d3
+	add.w	d0,d3
+	add.w	d0,d3
+	swap.w	d3
+	asr.l	#4,d3		*7/16
+	add.l	d3,1*4(a2)
+
+	moveq.l	#0,d3
+	move.w	d1,d3
+	add.w	d3,d3		*7倍
+	add.w	d3,d3
+	add.w	d1,d3
+	add.w	d1,d3
+	add.w	d1,d3
+	swap.w	d3
+	asr.l	#4,d3		*7/16
+	add.l	d3,1*4(a3)
+
+	moveq.l	#0,d3
+	move.w	d2,d3
+	add.w	d3,d3		*7倍
+	add.w	d3,d3
+	add.w	d2,d3
+	add.w	d2,d3
+	add.w	d2,d3
+	swap.w	d3
+	asr.l	#4,d3		*7/16
+	add.l	d3,1*4(a4)
+
+@@:	cmpi.w	#512-1,d6
+	beq	@@f		*X = 0の場合
+	tst.w	d7
+	beq	@@f		*Y= 511の場合
+@@:	moveq.l	#0,d3
+	move.w	d0,d3
+	add.w	d3,d3		*3倍
+	add.w	d0,d3
+	swap.w	d3
+	asr.l	#4,d3		*3/16
+	add.l	d3,511*4(a2)
+	moveq.l	#0,d3
+	move.w	d1,d3
+	add.w	d3,d3		*3倍
+	add.w	d1,d3
+	swap.w	d3
+	asr.l	#4,d3		*3/16
+	add.l	d3,511*4(a3)
+	moveq.l	#0,d3
+	move.w	d2,d3
+	add.w	d3,d3		*3倍
+	add.w	d2,d3
+	swap.w	d3
+	asr.l	#4,d3		*3/16
+	add.l	d3,511*4(a4)
+
+@@:	tst.w	d7
+	beq	@f		*Y= 511の場合
+	moveq.l	#0,d3
+	move.w	d0,d3
+	add.w	d3,d3		*5倍
+	add.w	d3,d3
+	add.w	d0,d3
+	swap.w	d3
+	asr.l	#4,d3		*5/16
+	add.l	d3,512*4(a2)
+	moveq.l	#0,d3
+	move.w	d1,d3
+	add.w	d3,d3		*5倍
+	add.w	d3,d3
+	add.w	d1,d3
+	swap.w	d3
+	asr.l	#4,d3		*5/16
+	add.l	d3,512*4(a3)
+	moveq.l	#0,d3
+	move.w	d2,d3
+	add.w	d3,d3		*5倍
+	add.w	d3,d3
+	add.w	d2,d3
+	swap.w	d3
+	asr.l	#4,d3		*5/16
+	add.l	d3,512*4(a4)
+
+@@:	tst.w	d6
+	beq	@f		*X = 511の場合
+	tst.w	d7
+	beq	@f		*Y = 511の場合
+	moveq.l	#0,d3
+	move.w	d0,d3
+	swap.w	d3
+	asr.l	#4,d3		*1/16
+	add.l	d3,513*4(a2)
+	moveq.l	#0,d3
+	move.w	d1,d3
+	swap.w	d3
+	asr.l	#4,d3		*1/16
+	add.l	d3,513*4(a3)
+	moveq.l	#0,d3
+	move.w	d2,d3
+	swap.w	d3
+	asr.l	#4,d3		*1/16
+	add.l	d3,513*4(a4)
+
+@@:	lea.l	1*4(a2),a2
+	lea.l	1*4(a3),a3
+	lea.l	1*4(a4),a4
+
+	lea.l	text_bit_table(a6),a5
+	move.w	text_write_counter(a6),d0
+	lsl.w	#6,d0
+	add.w	d4,d0
+	add.w	d4,d0
+	move.l	(a5,d0.w),d1
+	or.l	d1,d5
+
+	addq.w	#1,text_write_counter(a6)
+	andi.w	#7,text_write_counter(a6)
+	bne	@f
+	move.b	d5,(a1)
+	ror.l	#8,d5
+	adda.l	#$8000,a1
+	move.b	d5,(a1)
+	ror.l	#8,d5
+	adda.l	#$8000,a1
+	move.b	d5,(a1)
+	ror.l	#8,d5
+	adda.l	#$8000,a1
+	move.b	d5,(a1)
+
+	moveq.l	#0,d5
+	suba.l	#$18000,a1
+	lea.l	1(a1),a1
+@@:	dbra	d6,next_dot_loop
+
+	lea.l	diffusion_work_r(a6),a2
+	lea.l	(512+2)*4(a2),a3
+	move.w	#512+2-1,d0
+@@:	move.l	(a3)+,(a2)+
+	dbra	d0,@b
+	move.w	#512+2-1,d0
+@@:	clr.l	(a2)+
+	dbra	d0,@b
+
+	lea.l	diffusion_work_g(a6),a2
+	lea.l	(512+2)*4(a2),a3
+	move.w	#512+2-1,d0
+@@:	move.l	(a3)+,(a2)+
+	dbra	d0,@b
+	move.w	#512+2-1,d0
+@@:	clr.l	(a2)+
+	dbra	d0,@b
+
+	lea.l	diffusion_work_b(a6),a2
+	lea.l	(512+2)*4(a2),a3
+	move.w	#512+2-1,d0
+@@:	move.l	(a3)+,(a2)+
+	dbra	d0,@b
+	move.w	#512+2-1,d0
+@@:	clr.l	(a2)+
+	dbra	d0,@b
+
+	dbra	d7,next_line_loop
+	rts
+
+r_colors:
+	dc.w	$00, $0F, $00, $0F, $00, $0F, $00, $17, $07, $1F, $00, $1F, $00, $1F, $00, $1F
+g_colors:
+	dc.w	$00, $00, $0F, $0F, $00, $00, $0F, $17, $07, $00, $1F, $1F, $00, $00, $1F, $1F
+b_colors:
+	dc.w	$00, $00, $00, $00, $0F, $0F, $0F, $17, $07, $00, $00, $00, $1F, $1F, $1F, $1F
+
+text_table:
+	dc.l	%00000000_00000000_00000000_00000000
+	dc.l	%00000000_00000000_00000000_10000000
+	dc.l	%00000000_00000000_10000000_00000000
+	dc.l	%00000000_00000000_10000000_10000000
+	dc.l	%00000000_10000000_00000000_00000000
+	dc.l	%00000000_10000000_00000000_10000000
+	dc.l	%00000000_10000000_10000000_00000000
+	dc.l	%00000000_10000000_10000000_10000000
+	dc.l	%10000000_00000000_00000000_00000000
+	dc.l	%10000000_00000000_00000000_10000000
+	dc.l	%10000000_00000000_10000000_00000000
+	dc.l	%10000000_00000000_10000000_10000000
+	dc.l	%10000000_10000000_00000000_00000000
+	dc.l	%10000000_10000000_00000000_10000000
+	dc.l	%10000000_10000000_10000000_00000000
+	dc.l	%10000000_10000000_10000000_10000000
+
+*-----------------------------------------------
+*
+*	 結果の出力
+*
+*-----------------------------------------------
+output_result:
+	tst.b	text_file_save_mode(a6)
+	bne	save_text_data
+
+	lea.l	crt_mode_512_512_65535_31(pc),a0
+	bsr	change_crt_mode
+
+	IOCS	_OS_CUROF
+	bsr	text_area_backup
+	bsr	text_area_clear
+
+	lea.l	$e82200,a0
+	lea.l	text_color_backup(a6),a1
+	moveq.l	#16-1,d0
+@@:	move.w	(a0)+,(a1)+
+	dbra	d0,@b
+
+	tst.b	floyd_steinberg_mode(a6)
+	bne	set_palette_for_fs
+
+	lea.l	$e82200,a0
+	move.w	#%00000_00000_00000_0,(a0)+
+	move.w	#%00000_00000_11111_0,(a0)+
+	move.w	#%00000_11111_00000_0,(a0)+
+	move.w	#%00000_11111_11111_0,(a0)+
+	move.w	#%11111_00000_00000_0,(a0)+
+	move.w	#%11111_00000_11111_0,(a0)+
+	move.w	#%11111_11111_00000_0,(a0)+
+	move.w	#%11111_11111_11111_0,(a0)+
+	bra	draw_to_text_vram
+
+set_palette_for_fs:
+	lea.l	$e82200,a0
+	moveq.l	#16-1,d0
+	moveq.l	#0,d1
+	lea.l	g_colors(pc),a1
+	lea.l	r_colors(pc),a2
+	lea.l	b_colors(pc),a3
+@@:	moveq.l	#0,d2
+	move.w	d1,d3
+	add.w	d3,d3
+
+	move.w	(a1,d3),d4
+	andi.w	#$1f,d4
+	move.w	d4,d2
+	lsl.w	#6,d2
+
+	move.w	(a2,d3),d4
+	andi.w	#$1f,d4
+	lsl.w	#1,d4
+	or.w	d4,d2
+	lsl.w	#5,d2
+
+	move.w	(a3,d3),d4
+	andi.w	#$1f,d4
+	lsl.w	#1,d4
+	or.w	d4,d2
+
+	move.w	d2,(a0)+
+	addq.w	#1,d1
+	dbra	d0,@b
+
+draw_to_text_vram:
+	movea.l	text_point(a6),a0
+	lea.l	$e00000,a1
+	move.w	#512-1,d7
+@@:	movem.l	(a0)+,d0-d6/a2
+	movem.l	d0-d6/a2,(a1)
+	movem.l	(a0)+,d0-d6/a2
+	movem.l	d0-d6/a2,32(a1)
+	lea.l	128(a1),a1
+	dbra	d7,@b
+
+	lea.l	$e20000,a1
+	move.w	#512-1,d7
+@@:	movem.l	(a0)+,d0-d6/a2
+	movem.l	d0-d6/a2,(a1)
+	movem.l	(a0)+,d0-d6/a2
+	movem.l	d0-d6/a2,32(a1)
+	lea.l	128(a1),a1
+	dbra	d7,@b
+
+	lea.l	$e40000,a1
+	move.w	#512-1,d7
+@@:	movem.l	(a0)+,d0-d6/a2
+	movem.l	d0-d6/a2,(a1)
+	movem.l	(a0)+,d0-d6/a2
+	movem.l	d0-d6/a2,32(a1)
+	lea.l	128(a1),a1
+	dbra	d7,@b
+
+	tst.b	floyd_steinberg_mode(a6)
+	beq	start_key_wait
+
+	lea.l	$e60000,a1
+	move.w	#512-1,d7
+@@:	movem.l	(a0)+,d0-d6/a2
+	movem.l	d0-d6/a2,(a1)
+	movem.l	(a0)+,d0-d6/a2
+	movem.l	d0-d6/a2,32(a1)
+	lea.l	128(a1),a1
+	dbra	d7,@b
+
+start_key_wait:
+	moveq.l	#60-1,d0
+wait_1_sec:
+	btst.b	#4,$e88001
+	beq	wait_1_sec
+@@:	btst.b	#4,$e88001
+	bne	@b
+	dbra	d0,wait_1_sec
+exit_key_wait:
+	btst.b	#1,$800
+	bne	text_restore
+	btst.b	#5,$803
+	bne	text_restore
+	bra	exit_key_wait
+
+text_restore:
+	lea.l	$e82200,a0
+	lea.l	text_color_backup(a6),a1
+	moveq.l	#16-1,d0
+@@:	move.w	(a1)+,(a0)+
+	dbra	d0,@b
+
+	bsr	text_area_restore
+
+	IOCS	_OS_CURON
+	rts
+
+text_area_backup:
+	movem.l	d0-d1,-(sp)
+	move.w	$e8002a,-(sp)
+	move.w	#$01ff,$e8002a
+	move.w	#$0080,d0
+	move.w	#(512/4)-1,d1
+	bsr	raster_copy
+	bsr	raster_copy_stop
+	move.w	(sp)+,$e8002a
+	movem.l	(sp)+,d0-d1
+	rts
+
+text_area_clear:
+	move.w	$e8002a,-(sp)
+	move.w #$01ff,$e8002a
+	lea.l	$e00000,a0
+	moveq.l #0,d0
+	moveq.l #0,d1
+	moveq.l #0,d2
+	moveq.l #0,d3
+	moveq.l #0,d4
+	moveq.l #0,d5
+	moveq.l #0,d6
+	movea.l d0,a1
+	move.w	#512-1,d7
+@@:	movem.l d0-d6/a1,(a0)
+	movem.l d0-d6/a1,32(a0)
+	movem.l d0-d6/a1,64(a0)
+	movem.l d0-d6/a1,96(a0)
+	lea.l	128(a0),a0
+	dbra	d7,@b
+	move.w	(sp)+,$e8002a
+	rts
+
+text_area_restore:
+	movem.l	d0-d1,-(sp)
+	move.w	$e8002a,-(sp)
+	move.w	#$01ff,$e8002a
+	move.w	#$8000,d0
+	move.w	#(512/4)-1,d1
+	bsr	raster_copy
+	bsr	raster_copy_stop
+	move.w	(sp)+,$e8002a
+	movem.l	(sp)+,d0-d1
+	rts
+
+save_text_data:
+	move.w	#$20,-(sp)
+	pea.l	text_file_save_path(a6)
+	DOS	_CREATE
+	addq.l	#6,sp
+	move.l	d0,d1
+	tst.l	d0
+	bmi	error_file_1
+
+	move.l	#128*512*3,d0
+	tst.b	floyd_steinberg_mode(a6)
+	beq	@f
+	move.l	#128*512*4,d0
+@@:	move.l	d0,-(sp)			*テキストデータを書き込み
+	move.l	text_point(a6),-(sp)
+	move.w	d1,-(sp)
+	DOS	_WRITE
+	lea.l	10(sp),sp
+	tst.l	d0
+	bmi	error_file_4
+
+	move.w	d1,-(sp)
+	DOS	_CLOSE
+	addq.l	#2,sp
+	rts
+
+*-----------------------------------------------
+*
+*	 テキスト画像ファイルを読み込み
+*
+*-----------------------------------------------
+read_text_file:
+	move.w	#2,-(sp)
+	pea.l	text_file_load_path(a6)
+	DOS	_OPEN
+	addq.l	#6,sp
+	move.l	d0,d1
+	tst.l	d0
+	bmi	error_file_1
+
+	move.w	#2,-(sp)
+	clr.l	-(sp)
+	move.w	d1,-(sp)
+	DOS	_SEEK
+	addq.l	#8,sp
+	move.l	d0,d2
+	move.l	d2,file_size(a6)
+
+	move.l	#128*512*3,d0
+	tst.b	floyd_steinberg_mode(a6)
+	beq	@f
+	move.l	#128*512*4,d0
+@@:	cmp.l	d0,d2
+	bne	error_file_5
+
+	move.w	#0,-(sp)
+	clr.l	-(sp)
+	move.w	d1,-(sp)
+	DOS	_SEEK
+	addq.l	#8,sp
+
+	move.l	d2,-(sp)
+	DOS	_MALLOC
+	addq.l	#4,sp
+	tst.l	d0
+	bmi	error_memory
+	move.l	d0,text_point(a6)
+
+	move.l	file_size(a6),-(sp)
+	move.l	d0,-(sp)
+	move.w	d1,-(sp)
+	DOS	_READ
+	lea.l	10(sp),sp
+	tst.l	d0
+	bmi	error_file_2
+
+	move.w	d1,-(sp)
+	DOS	_CLOSE
+	addq.l	#2,sp
+	rts
+
+*-----------------------------------------------
+*
+*	終了処理
+*
+*-----------------------------------------------
+finalize:
+	move.l	file_point(a6),a0
+	bsr	mfree
+	move.l	picwork_point(a6),a0
+	bsr	mfree
+	move.l	gram_point(a6),a0
+	bsr	mfree
+	move.l	text_point(a6),a0
+	bsr	mfree
+	rts
+
+*-----------------------------------------------
+*
+*	画面モードの切り替え
+*
+*	in : a0.l = CRTCデータ
+*
+*-----------------------------------------------
+change_crt_mode:
+	movem.l	d0-d1/a0-a2,-(sp)
+
+	move.w	(a0)+,d0
+	move.b	d0,$e8e007		*HRLの設定
+
+	move.w	(a0),d0
+	movea.l	#$e80000,a1
+	move.w	$28(a1),d1
+	ext.w	d0			*上位ビットをクリア
+	ext.w	d1
+	cmp.b	d1,d0
+	bhs	crtc_set_ltoh
+
+	move.w	(a0)+,$e80028
+	moveq.l	#9-1,d0
+@@:	move.w	(a0)+,(a1)+
+	dbra	d0,@b
+	bra	crtc_set_other_data
+crtc_set_ltoh:
+	move.w	(a0)+,d1
+	moveq.l	#9-1,d0
+@@:	move.w	(a0)+,(a1)+
+	dbra	d0,@b
+	move.w	d1,$e80028
+crtc_set_other_data:
+	move.w	$e80028,d0
+	lsr.w	#8,d0
+	move.w	d0,$e82400
+
+	movea.l	#$eb080a,a1
+	move.w	(a0)+,$2(a1)		*H-DISPの設定
+	move.w	#$ff,d0
+	dbra	d0,*			*130μsec 以上待つ
+
+	move.w	(a0)+,(a1)		*H-TOTAL
+	move.w	(a0)+,$4(a1)		*V-DISP
+	move.w	$e80028,d0
+	ext.w	d0
+	move.w	d0,$6(a1)		*$eb0810
+	movem.l	(sp)+,d0-d1/a0-a2
+	rts
+
+crt_mode_512_512_65535_31:
+	dc.w	8,%00000011_00010101,91,9,17,81,567,5,40,552,27
+	dc.w	17+4,$ff,40
+
+*-----------------------------------------------
+*
+*	ラスタコピー実行
+*
+*	in : d0.w = $e8002cに書き込む値
+*	in : d1.w = ラスタコピーする回数-1
+*
+*-----------------------------------------------
+raster_copy:
+	move.w	sr,-(sp)
+	ori.w	#$0700,sr
+@@:	tst.b	$e88001
+	bmi	@b
+@@:	tst.b	$e88001
+	bpl	@b
+	move.w	d0,$e8002c
+	bset.b	#3,$e80481
+	addi.w	#$0101,d0
+	dbra	d1,@@b
+	move.w	(sp)+,sr
+	rts
+
+*-----------------------------------------------
+*
+*	ラスタコピー終了
+*
+*-----------------------------------------------
+raster_copy_stop:
+	move.w	sr,-(sp)
+	ori.w	#$0700,sr
+@@:	tst.b	$e88001
+	bmi	@b
+@@:	tst.b	$e88001
+	bpl	@b
+	bclr.b	#3,$e80481
+	move.w	(sp)+,sr
+	rts
+
+*-----------------------------------------------
+*
+*	メモリの解放
+*
+*	in : a0.l = MALLOCで確保したメモリのアドレス
+*
+*-----------------------------------------------
+mfree:
+	movem.l	a0,-(sp)
+	cmpa.l	#0,a0
+	beq	@f
+	move.l	a0,-(sp)
+	DOS	_MFREE
+	addq.l	#4,sp
+@@:	movem.l	(sp)+,a0
+	rts
+
+*-----------------------------------------------
+*
+*	エラー処理
+*
+*-----------------------------------------------
+error_file_1:
+	lea.l	m_file_1(pc),a1
+	bra	error_exit
+error_file_2:
+	lea.l	m_file_2(pc),a1
+	bra	error_exit
+error_file_3:
+	lea.l	m_file_3(pc),a1
+	bra	error_exit
+error_file_4:
+	lea.l	m_file_4(pc),a1
+	bra	error_exit
+error_file_5:
+	lea.l	m_file_5(pc),a1
+	bra	error_exit
+error_memory:
+	lea.l	m_memory(pc),a1
+	bra	error_exit
+error_picload:
+	lea.l	m_picload(pc),a1
+	bra	error_exit
+error_piccolor:
+	lea.l	m_piccolor(pc),a1
+	bra	error_exit
+help:
+	lea.l	m_usage(pc),a1
+*	bra	error_exit
+error_exit:
+	move.l	a1,-(sp)
+	PRINT	m_name
+	move.l	(sp)+,a1
+	IOCS	_B_PRINT
+	bsr	finalize
+	movea.l	ssp_work(a6),a1
+	IOCS	_B_SUPER
+	move.w	#-1,-(sp)
+	DOS	_EXIT2
+
+m_name:
+	dc.b	"PIC to Text converter 'PIC2TXT.R' version 1.00",13,10
+	dc.b	'Programmed by M.Taguchi.',13,10,0
+m_usage:
+	dc.b	'Usage: PIC2TXT -[switch] <pic-file-path>',13,10
+	dc.b	'    -D テキスト画像の直接ロード(default)',13,10
+	dc.b	'    -L <text-file-path> テキスト画像の読み込み',13,10
+	dc.b	'    -S <text-file-path> テキスト画像の書き込み',13,10
+	dc.b	'    -F Floyd Steinberg法使用(未完成)',13,10,0
+m_file_1:
+	dc.b	'ファイルが見付かりません',13,10,0
+m_file_2:
+	dc.b	'ファイルが読めません',13,10,0
+m_file_3:
+	dc.b	'ファイルが作成出来ません',13,10,0
+m_file_4:
+	dc.b	'ファイルが書き込めません',13,10,0
+m_file_5:
+	dc.b	'テキスト画像ファイルではありません',13,10,0
+m_memory:
+	dc.b	'メモリが足りません',13,10,0
+m_picload:
+	dc.b	'PICファイルのロードに失敗しました',13,10,0
+m_piccolor:
+	dc.b	'PICファイルが32K色、または64K色の形式ではありません',13,10,0
+
+	.even
+work_top:
+	ds.b	WORK_SIZE
+mystack:
+	ds.l	1024
+mysp:
+
+program_end:
+	.end	boot
+
