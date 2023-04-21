@@ -1,5 +1,5 @@
 *
-*	PIC to Text converter 'PIC2TXT.R' version 1.00
+*	PIC to text image converter 'PIC2TXT.R' version 1.01
 *
 *	Programmed by M.Taguchi.
 *
@@ -16,6 +16,11 @@ PRINT	macro	data
 	endm
 
 THRESHOLD		equ	31
+HEADER_SIZE		equ	4
+HEADER_KIND_OFFSET	equ	3
+DATA_KIND_NORMAL	equ	0		*デフォルト変換
+DATA_KIND_FS		equ	1		*FS変換
+DATA_KIND_FS_GS		equ	2		*FS変換(GrayScale)
 
 	.list
 
@@ -27,14 +32,16 @@ ssp_work:		ds.l	1
 direct_load_mode:	ds.b	1
 text_file_load_mode:	ds.b	1
 text_file_save_mode:	ds.b	1
-floyd_steinberg_mode:	ds.b	1
+fs_mode:		ds.b	1
+fs_gs_mode:		ds.b	1
 
 * 共通ファイル関係ワーク
+	.even
 file_point:		ds.l	1
 file_size:		ds.l	1
-pic_file_path:		ds.b	255
-text_file_load_path:	ds.b	255
-text_file_save_path:	ds.b	255
+pic_file_path:		ds.b	256
+text_file_load_path:	ds.b	256
+text_file_save_path:	ds.b	256
 
 * PIC展開時使用ワーク
 picwork_point:		ds.l	1
@@ -55,13 +62,12 @@ diffusion_work_b:	ds.l	(512+2)*2
 r_work:			ds.w	1
 g_work:			ds.w	1
 b_work:			ds.w	1
-text_write_counter:	ds.b	1
-text_1_work:		ds.b	1
-text_2_work:		ds.b	1
-text_3_work:		ds.b	1
-text_4_work:		ds.b	1
+text_write_counter:	ds.w	1
 selected_palette	ds.w	1
 text_bit_table		ds.l	16*8
+r_colors_adr		ds.l	1
+g_colors_adr		ds.l	1
+b_colors_adr		ds.l	1
 
 apicginfo:
 pic_start_x:		ds.l	1
@@ -84,10 +90,11 @@ boot:
 	lea.l	mysp(pc),sp
 	bsr	initialize
 
-	move.b	#1,direct_load_mode(a6)
-	move.b	#0,text_file_load_mode(a6)
-	move.b	#0,text_file_save_mode(a6)
-	move.b	#0,floyd_steinberg_mode(a6)
+	st.b	direct_load_mode(a6)
+	sf.b	text_file_load_mode(a6)
+	sf.b	text_file_save_mode(a6)
+	sf.b	fs_mode(a6)
+	sf.b	fs_gs_mode(a6)
 
 	lea.l	pic_file_path(a6),a4
 	tst.b	(a2)+
@@ -108,14 +115,14 @@ analyze_loop:
 @@:	move.b	(a2)+,d0
 	beq	help
 	andi.b	#$df,d0
-	cmpi.b	#'D',d0
-	beq	enable_dicrect_load_mode
 	cmpi.b	#'L',d0
 	beq	enable_text_file_load_mode
 	cmpi.b	#'S',d0
 	beq	enable_text_file_save_mode
 	cmpi.b	#'F',d0
-	beq	enable_floyd_steinberg_mode
+	beq	enable_fs_mode
+	cmpi.b	#'G',d0
+	beq	enable_fs_gs_mode
 	bra	help
 analyze_end:
 	clr.b	(a4)
@@ -125,24 +132,25 @@ analyze_end:
 	tst.b	(a4)
 	beq	help
 	bra	main
-@@:	move.b	#0,text_file_save_mode(a6)
+@@:	sf.b	text_file_save_mode(a6)
 	bra	main
 
-enable_dicrect_load_mode:
-	move.b	#1,direct_load_mode(a6)
-	bra	analyze_loop
 enable_text_file_load_mode:
 	lea.l	text_file_load_path(a6),a5
 	bsr	copy_text_file_path
-	move.b	#1,text_file_load_mode(a6)
+	st.b	text_file_load_mode(a6)
 	bra	analyze_loop
 enable_text_file_save_mode:
 	lea.l	text_file_save_path(a6),a5
 	bsr	copy_text_file_path
-	move.b	#1,text_file_save_mode(a6)
+	st.b	text_file_save_mode(a6)
 	bra	analyze_loop
-enable_floyd_steinberg_mode:
-	move.b	#1,floyd_steinberg_mode(a6)
+enable_fs_mode:
+	st.b	fs_mode(a6)
+	bra	analyze_loop
+enable_fs_gs_mode:
+	st.b	fs_mode(a6)
+	st.b	fs_gs_mode(a6)
 	bra	analyze_loop
 
 copy_text_file_path:
@@ -178,6 +186,7 @@ copy_text_file_path:
 main:
 	tst.b	text_file_load_mode(a6)
 	bne	text_file_load
+	bsr	print_name
 	bsr	read_pic_file
 	bsr	graphic_to_text
 	bsr	output_result
@@ -262,6 +271,8 @@ read_pic_file:
 	DOS	_CLOSE
 	addq.l	#2,sp
 
+	PRINT	m_picload
+
 	move.l	#524288,-(sp)		*PICを展開するバッファ
 	DOS	_MALLOC
 	addq.l	#4,sp
@@ -322,20 +333,28 @@ read_pic_file:
 *
 *-----------------------------------------------
 graphic_to_text:
-	tst.b	floyd_steinberg_mode(a6)
+	PRINT	m_convert
+
+	tst.b	fs_mode(a6)
 	bne	graphic_to_text_fs
 
-	move.l	#128*512*3,-(sp)	*テキスト3プレーン分
+	move.l	#128*512*3+HEADER_SIZE,-(sp)	*テキスト3プレーン分+ヘッダ
 	DOS	_MALLOC
 	addq.l	#4,sp
 	tst.l	d0
 	bmi	error_memory
 	move.l	d0,text_point(a6)
+	lea.l	text_image_header(pc),a0
+	movea.l	d0,a1
+	moveq.l	#HEADER_SIZE-1,d0
+@@:	move.b	(a0)+,(a1)+
+	dbra	d0,@b
 
 	bsr	init_diffusion_work
 	movea.l	gram_point(a6),a0
 	move.l	a0,a4
 	movea.l	text_point(a6),a1
+	adda.l	#HEADER_SIZE,a1
 	lea.l	diffusion_work_1+1(a6),a2
 	lea.l	diffusion_work_2+1(a6),a3
 	moveq.l	#0,d1
@@ -524,6 +543,8 @@ green_loop_2:
 	lea.l	2048(a4),a4
 	move.l	a4,a0
 	dbra	d7,green_loop_1
+
+	PRINT	m_convert_finish
 	rts
 
 init_diffusion_work:
@@ -574,7 +595,7 @@ diffusion_sub_2:
 *
 *-----------------------------------------------
 graphic_to_text_fs:
-	move.l	#128*512*4,-(sp)	*テキスト4プレーン分
+	move.l	#128*512*4+HEADER_SIZE,-(sp)	*テキスト4プレーン分
 	DOS	_MALLOC
 	addq.l	#4,sp
 	tst.l	d0
@@ -595,12 +616,39 @@ make_text_bit_table:
 	addq.l	#1,d3
 	dbra	d1,make_text_bit_table
 
+	tst.b	fs_gs_mode(a6)
+	bne	@f
+	lea.l	r_colors(pc),a0
+	move.l	a0,r_colors_adr(a6)
+	lea.l	g_colors(pc),a0
+	move.l	a0,g_colors_adr(a6)
+	lea.l	b_colors(pc),a0
+	move.l	a0,b_colors_adr(a6)
+	lea.l	text_image_header_kind(pc),a0
+	move.b	#DATA_KIND_FS,(a0)
+	bra	@@f
+@@:	lea.l	r_gray_colors(pc),a0
+	move.l	a0,r_colors_adr(a6)
+	lea.l	g_gray_colors(pc),a0
+	move.l	a0,g_colors_adr(a6)
+	lea.l	b_gray_colors(pc),a0
+	move.l	a0,b_colors_adr(a6)
+	lea.l	text_image_header_kind(pc),a0
+	move.b	#DATA_KIND_FS_GS,(a0)
+@@:	lea.l	text_image_header(pc),a0
+	move.l	text_point(a6),a1
+	moveq.l	#HEADER_SIZE-1,d0
+@@:	move.b	(a0)+,(a1)+
+	dbra	d0,@b
+
 	movea.l	gram_point(a6),a0
 	movea.l	text_point(a6),a1
+	adda.l	#HEADER_SIZE,a1
 
 *	d0: 破壊
 *	d1: 破壊
 *	d2: 破壊
+*	d3: 破壊
 *	d4: 選択したパレット
 *	d5: テキスト書き込み用ワーク
 *	d6: Xカウンタ
@@ -644,9 +692,7 @@ next_dot_loop:
 	move.w	d0,d1			*R
 	lsr.w	#6,d1
 	andi.w	#$1f,d1
-	move.l	(a2),d2
-	swap.w	d2
-	add.w	d2,d1
+	add.w	(a2),d1
 	cmpi.w	#$1f,d1
 	ble	@f
 	moveq.l	#$1f,d1
@@ -658,9 +704,7 @@ next_dot_loop:
 	move.w	d0,d1			*G
 	rol.w	#5,d1
 	andi.w	#$1f,d1
-	move.l	(a3),d2
-	swap.w	d2
-	add.w	d2,d1
+	add.w	(a3),d1
 	cmpi.w	#$1f,d1
 	ble	@f
 	moveq.l	#$1f,d1
@@ -672,9 +716,7 @@ next_dot_loop:
 	move.w	d0,d1			*B
 	lsr.w	#1,d1
 	andi.w	#$1f,d1
-	move.l	(a4),d2
-	swap.w	d2
-	add.w	d2,d1
+	add.w	(a4),d1
 	cmpi.w	#$1f,d1
 	ble	@f
 	moveq.l	#$1f,d1
@@ -683,80 +725,68 @@ next_dot_loop:
 	moveq.l	#0,d1
 @@:	move.w	d1,b_work(a6)
 
-	move.l	#(31*31*3)+1,d3
+	move.w	#(31*31*3)+1,d3
 	moveq.l	#0,d4
-find_closed_palette:
-	moveq.l	#0,d0
+	move.l	r_colors_adr(a6),a5
+	move.l	a0,d2
+	lea.l	square_table(pc),a0
+find_closest_palette:
 	move.w	r_work(a6),d0
-	lea.l	r_colors(pc),a5
 	sub.w	(a5,d4),d0
-	muls.w	d0,d0
-	moveq.l	#0,d1
-	move.w	g_work(a6),d1
-	lea.l	g_colors(pc),a5
-	sub.w	(a5,d4),d1
-	muls.w	d1,d1
-	moveq.l	#0,d2
-	move.w	b_work(a6),d2
-	lea.l	b_colors(pc),a5
-	sub.w	(a5,d4),d2
-	muls.w	d2,d2
-	add.l	d1,d0
-	add.l	d2,d0
+	add.w	#$1f,d0
+	add.w	d0,d0
+	move.w	(a0,d0.w),d1
+	move.w	g_work(a6),d0
+	sub.w	32(a5,d4),d0
+	add.w	#$1f,d0
+	add.w	d0,d0
+	add.w	(a0,d0.w),d1
+	move.w	b_work(a6),d0
+	sub.w	64(a5,d4),d0
+	add.w	#$1f,d0
+	add.w	d0,d0
+	add.w	(a0,d0.w),d1
 
-	cmp.l	d0,d3
+	cmp.w	d1,d3
 	ble	@f
-	move.l	d0,d3
+	move.l	d1,d3
 	move.w	d4,selected_palette(a6)
 @@:	addq.w	#2,d4
 	cmpi.w	#32,d4
-	bne	find_closed_palette
+	bne	find_closest_palette
+	move.l	d2,a0
 
 	move.w	selected_palette(a6),d4
-	moveq.l	#0,d0
 	move.w	r_work(a6),d0
-	lea.l	r_colors(pc),a5
+	move.l	r_colors_adr(a6),a5
 	sub.w	(a5,d4),d0
-	moveq.l	#0,d1
 	move.w	g_work(a6),d1
-	lea.l	g_colors(pc),a5
-	sub.w	(a5,d4),d1
-	moveq.l	#0,d2
+	sub.w	32(a5,d4),d1
 	move.w	b_work(a6),d2
-	lea.l	b_colors(pc),a5
-	sub.w	(a5,d4),d2
+	sub.w	64(a5,d4),d2
 
 	tst.w	d6
 	beq	@f		*X = 511の場合
 	moveq.l	#0,d3
 	move.w	d0,d3
-	add.w	d3,d3		*7倍
-	add.w	d3,d3
-	add.w	d0,d3
-	add.w	d0,d3
-	add.w	d0,d3
+	lsl.w	#3,d3		*7倍
+	sub.w	d0,d3
 	swap.w	d3
 	asr.l	#4,d3		*7/16
 	add.l	d3,1*4(a2)
 
 	moveq.l	#0,d3
 	move.w	d1,d3
-	add.w	d3,d3		*7倍
-	add.w	d3,d3
-	add.w	d1,d3
-	add.w	d1,d3
-	add.w	d1,d3
+	lsl.w	#3,d3		*7倍
+	sub.w	d1,d3
 	swap.w	d3
 	asr.l	#4,d3		*7/16
 	add.l	d3,1*4(a3)
 
 	moveq.l	#0,d3
 	move.w	d2,d3
-	add.w	d3,d3		*7倍
-	add.w	d3,d3
-	add.w	d2,d3
-	add.w	d2,d3
-	add.w	d2,d3
+	lsl.w	#3,d3		*7倍
+	sub.w	d2,d3
 	swap.w	d3
 	asr.l	#4,d3		*7/16
 	add.l	d3,1*4(a4)
@@ -771,21 +801,21 @@ find_closed_palette:
 	add.w	d0,d3
 	swap.w	d3
 	asr.l	#4,d3		*3/16
-	add.l	d3,511*4(a2)
+	add.l	d3,(511+2)*4(a2)
 	moveq.l	#0,d3
 	move.w	d1,d3
 	add.w	d3,d3		*3倍
 	add.w	d1,d3
 	swap.w	d3
 	asr.l	#4,d3		*3/16
-	add.l	d3,511*4(a3)
+	add.l	d3,(511+2)*4(a3)
 	moveq.l	#0,d3
 	move.w	d2,d3
 	add.w	d3,d3		*3倍
 	add.w	d2,d3
 	swap.w	d3
 	asr.l	#4,d3		*3/16
-	add.l	d3,511*4(a4)
+	add.l	d3,(511+2)*4(a4)
 
 @@:	tst.w	d7
 	beq	@f		*Y= 511の場合
@@ -796,7 +826,7 @@ find_closed_palette:
 	add.w	d0,d3
 	swap.w	d3
 	asr.l	#4,d3		*5/16
-	add.l	d3,512*4(a2)
+	add.l	d3,(512+2)*4(a2)
 	moveq.l	#0,d3
 	move.w	d1,d3
 	add.w	d3,d3		*5倍
@@ -804,7 +834,7 @@ find_closed_palette:
 	add.w	d1,d3
 	swap.w	d3
 	asr.l	#4,d3		*5/16
-	add.l	d3,512*4(a3)
+	add.l	d3,(512+2)*4(a3)
 	moveq.l	#0,d3
 	move.w	d2,d3
 	add.w	d3,d3		*5倍
@@ -812,7 +842,7 @@ find_closed_palette:
 	add.w	d2,d3
 	swap.w	d3
 	asr.l	#4,d3		*5/16
-	add.l	d3,512*4(a4)
+	add.l	d3,(512+2)*4(a4)
 
 @@:	tst.w	d6
 	beq	@f		*X = 511の場合
@@ -822,17 +852,17 @@ find_closed_palette:
 	move.w	d0,d3
 	swap.w	d3
 	asr.l	#4,d3		*1/16
-	add.l	d3,513*4(a2)
+	add.l	d3,(513+2)*4(a2)
 	moveq.l	#0,d3
 	move.w	d1,d3
 	swap.w	d3
 	asr.l	#4,d3		*1/16
-	add.l	d3,513*4(a3)
+	add.l	d3,(513+2)*4(a3)
 	moveq.l	#0,d3
 	move.w	d2,d3
 	swap.w	d3
 	asr.l	#4,d3		*1/16
-	add.l	d3,513*4(a4)
+	add.l	d3,(513+2)*4(a4)
 
 @@:	lea.l	1*4(a2),a2
 	lea.l	1*4(a3),a3
@@ -861,64 +891,118 @@ find_closed_palette:
 	move.b	d5,(a1)
 
 	moveq.l	#0,d5
-	suba.l	#$18000,a1
-	lea.l	1(a1),a1
+	suba.l	#$18000-1,a1
 @@:	dbra	d6,next_dot_loop
 
 	lea.l	diffusion_work_r(a6),a2
 	lea.l	(512+2)*4(a2),a3
-	move.w	#512+2-1,d0
-@@:	move.l	(a3)+,(a2)+
+	move.w	#16-1,d0
+@@:	movem.l	(a3)+,d1-d6/a4-a5
+	movem.l	d1-d6/a4-a5,(a2)
+	movem.l	(a3)+,d1-d6/a4-a5
+	movem.l	d1-d6/a4-a5,32(a2)
+	movem.l	(a3)+,d1-d6/a4-a5
+	movem.l	d1-d6/a4-a5,64(a2)
+	movem.l	(a3)+,d1-d6/a4-a5
+	movem.l	d1-d6/a4-a5,96(a2)
+	lea.l	128(a2),a2
 	dbra	d0,@b
-	move.w	#512+2-1,d0
-@@:	clr.l	(a2)+
-	dbra	d0,@b
+	move.l	(a3)+,(a2)+
+	move.l	(a3)+,(a2)+
 
 	lea.l	diffusion_work_g(a6),a2
 	lea.l	(512+2)*4(a2),a3
-	move.w	#512+2-1,d0
-@@:	move.l	(a3)+,(a2)+
+	move.w	#16-1,d0
+@@:	movem.l	(a3)+,d1-d6/a4-a5
+	movem.l	d1-d6/a4-a5,(a2)
+	movem.l	(a3)+,d1-d6/a4-a5
+	movem.l	d1-d6/a4-a5,32(a2)
+	movem.l	(a3)+,d1-d6/a4-a5
+	movem.l	d1-d6/a4-a5,64(a2)
+	movem.l	(a3)+,d1-d6/a4-a5
+	movem.l	d1-d6/a4-a5,96(a2)
+	lea.l	128(a2),a2
 	dbra	d0,@b
-	move.w	#512+2-1,d0
-@@:	clr.l	(a2)+
-	dbra	d0,@b
+	move.l	(a3)+,(a2)+
+	move.l	(a3)+,(a2)+
 
 	lea.l	diffusion_work_b(a6),a2
 	lea.l	(512+2)*4(a2),a3
-	move.w	#512+2-1,d0
-@@:	move.l	(a3)+,(a2)+
+	move.w	#16-1,d0
+@@:	movem.l	(a3)+,d1-d6/a4-a5
+	movem.l	d1-d6/a4-a5,(a2)
+	movem.l	(a3)+,d1-d6/a4-a5
+	movem.l	d1-d6/a4-a5,32(a2)
+	movem.l	(a3)+,d1-d6/a4-a5
+	movem.l	d1-d6/a4-a5,64(a2)
+	movem.l	(a3)+,d1-d6/a4-a5
+	movem.l	d1-d6/a4-a5,96(a2)
+	lea.l	128(a2),a2
 	dbra	d0,@b
-	move.w	#512+2-1,d0
-@@:	clr.l	(a2)+
+	move.l	(a3)+,(a2)+
+	move.l	(a3)+,(a2)+
+
+	moveq.l	#0,d1
+	moveq.l	#0,d2
+	moveq.l	#0,d3
+	moveq.l	#0,d4
+	moveq.l	#0,d5
+	moveq.l	#0,d6
+	movea.l	#0,a4
+	movea.l	#0,a5
+
+	lea.l	diffusion_work_r(a6),a2
+	lea.l	(512+2)*4(a2),a2
+	move.w	#8-1,d0
+@@:	movem.l	d1-d6/a4-a5,(a2)
+	movem.l	d1-d6/a4-a5,32(a2)
+	movem.l	d1-d6/a4-a5,64(a2)
+	movem.l	d1-d6/a4-a5,96(a2)
+	movem.l	d1-d6/a4-a5,128(a2)
+	movem.l	d1-d6/a4-a5,160(a2)
+	movem.l	d1-d6/a4-a5,192(a2)
+	movem.l	d1-d6/a4-a5,224(a2)
+	lea.l	256(a2),a2
 	dbra	d0,@b
+	clr.l	(a2)+
+	clr.l	(a2)+
+
+	lea.l	diffusion_work_g(a6),a2
+	lea.l	(512+2)*4(a2),a2
+	move.w	#8-1,d0
+@@:	movem.l	d1-d6/a4-a5,(a2)
+	movem.l	d1-d6/a4-a5,32(a2)
+	movem.l	d1-d6/a4-a5,64(a2)
+	movem.l	d1-d6/a4-a5,96(a2)
+	movem.l	d1-d6/a4-a5,128(a2)
+	movem.l	d1-d6/a4-a5,160(a2)
+	movem.l	d1-d6/a4-a5,192(a2)
+	movem.l	d1-d6/a4-a5,224(a2)
+	lea.l	256(a2),a2
+	dbra	d0,@b
+	clr.l	(a2)+
+	clr.l	(a2)+
+
+	lea.l	diffusion_work_b(a6),a2
+	lea.l	(512+2)*4(a2),a2
+	move.w	#8-1,d0
+@@:	movem.l	d1-d6/a4-a5,(a2)
+	movem.l	d1-d6/a4-a5,32(a2)
+	movem.l	d1-d6/a4-a5,64(a2)
+	movem.l	d1-d6/a4-a5,96(a2)
+	movem.l	d1-d6/a4-a5,128(a2)
+	movem.l	d1-d6/a4-a5,160(a2)
+	movem.l	d1-d6/a4-a5,192(a2)
+	movem.l	d1-d6/a4-a5,224(a2)
+	lea.l	256(a2),a2
+	dbra	d0,@b
+	clr.l	(a2)+
+	clr.l	(a2)+
 
 	dbra	d7,next_line_loop
+
+	PRINT	m_convert_finish
 	rts
-
-r_colors:
-	dc.w	$00, $0F, $00, $0F, $00, $0F, $00, $17, $07, $1F, $00, $1F, $00, $1F, $00, $1F
-g_colors:
-	dc.w	$00, $00, $0F, $0F, $00, $00, $0F, $17, $07, $00, $1F, $1F, $00, $00, $1F, $1F
-b_colors:
-	dc.w	$00, $00, $00, $00, $0F, $0F, $0F, $17, $07, $00, $00, $00, $1F, $1F, $1F, $1F
-
-text_table:
-	dc.l	%00000000_00000000_00000000_00000000
-	dc.l	%00000000_00000000_00000000_10000000
-	dc.l	%00000000_00000000_10000000_00000000
-	dc.l	%00000000_00000000_10000000_10000000
-	dc.l	%00000000_10000000_00000000_00000000
-	dc.l	%00000000_10000000_00000000_10000000
-	dc.l	%00000000_10000000_10000000_00000000
-	dc.l	%00000000_10000000_10000000_10000000
-	dc.l	%10000000_00000000_00000000_00000000
-	dc.l	%10000000_00000000_00000000_10000000
-	dc.l	%10000000_00000000_10000000_00000000
-	dc.l	%10000000_00000000_10000000_10000000
-	dc.l	%10000000_10000000_00000000_00000000
-	dc.l	%10000000_10000000_00000000_10000000
-	dc.l	%10000000_10000000_10000000_00000000
-	dc.l	%10000000_10000000_10000000_10000000
 
 *-----------------------------------------------
 *
@@ -942,9 +1026,27 @@ output_result:
 @@:	move.w	(a0)+,(a1)+
 	dbra	d0,@b
 
-	tst.b	floyd_steinberg_mode(a6)
-	bne	set_palette_for_fs
+	movea.l	text_point(a6),a0
+	adda.l	#HEADER_KIND_OFFSET,a0
+	cmpi.b	#DATA_KIND_NORMAL,(a0)
+	bne	@f
+	clr.b	fs_mode(a6)
+	clr.b	fs_gs_mode(a6)
+	bra	set_palette
+@@:	cmpi.b	#DATA_KIND_FS,(a0)
+	bne	@f
+	st.b	fs_mode(a6)
+	clr.b	fs_gs_mode(a6)
+	bra	set_palette
+@@:	cmpi.b	#DATA_KIND_FS_GS,(a0)
+	bne	error_file_5
+	st.b	fs_mode(a6)
+	st.b	fs_gs_mode(a6)
+	bra	set_palette
 
+set_palette:
+	tst.b	fs_mode(a6)
+	bne	set_palette_fs
 	lea.l	$e82200,a0
 	move.w	#%00000_00000_00000_0,(a0)+
 	move.w	#%00000_00000_11111_0,(a0)+
@@ -956,13 +1058,19 @@ output_result:
 	move.w	#%11111_11111_11111_0,(a0)+
 	bra	draw_to_text_vram
 
-set_palette_for_fs:
+set_palette_fs:
 	lea.l	$e82200,a0
 	moveq.l	#16-1,d0
 	moveq.l	#0,d1
+	tst.b	fs_gs_mode(a6)
+	bne	@f
 	lea.l	g_colors(pc),a1
 	lea.l	r_colors(pc),a2
 	lea.l	b_colors(pc),a3
+	bra	@@f
+@@:	lea.l	g_gray_colors(pc),a1
+	lea.l	r_gray_colors(pc),a2
+	lea.l	b_gray_colors(pc),a3
 @@:	moveq.l	#0,d2
 	move.w	d1,d3
 	add.w	d3,d3
@@ -989,6 +1097,7 @@ set_palette_for_fs:
 
 draw_to_text_vram:
 	movea.l	text_point(a6),a0
+	adda.l	#HEADER_SIZE,a0
 	lea.l	$e00000,a1
 	move.w	#512-1,d7
 @@:	movem.l	(a0)+,d0-d6/a2
@@ -1016,7 +1125,7 @@ draw_to_text_vram:
 	lea.l	128(a1),a1
 	dbra	d7,@b
 
-	tst.b	floyd_steinberg_mode(a6)
+	tst.b	fs_mode(a6)
 	beq	start_key_wait
 
 	lea.l	$e60000,a1
@@ -1049,9 +1158,7 @@ text_restore:
 	moveq.l	#16-1,d0
 @@:	move.w	(a1)+,(a0)+
 	dbra	d0,@b
-
 	bsr	text_area_restore
-
 	IOCS	_OS_CURON
 	rts
 
@@ -1110,11 +1217,11 @@ save_text_data:
 	tst.l	d0
 	bmi	error_file_1
 
-	move.l	#128*512*3,d0
-	tst.b	floyd_steinberg_mode(a6)
+	move.l	#128*512*3+HEADER_SIZE,d0
+	tst.b	fs_mode(a6)
 	beq	@f
-	move.l	#128*512*4,d0
-@@:	move.l	d0,-(sp)			*テキストデータを書き込み
+	move.l	#128*512*4+HEADER_SIZE,d0
+@@:	move.l	d0,-(sp)		*テキストデータの書き込み
 	move.l	text_point(a6),-(sp)
 	move.w	d1,-(sp)
 	DOS	_WRITE
@@ -1149,13 +1256,6 @@ read_text_file:
 	move.l	d0,d2
 	move.l	d2,file_size(a6)
 
-	move.l	#128*512*3,d0
-	tst.b	floyd_steinberg_mode(a6)
-	beq	@f
-	move.l	#128*512*4,d0
-@@:	cmp.l	d0,d2
-	bne	error_file_5
-
 	move.w	#0,-(sp)
 	clr.l	-(sp)
 	move.w	d1,-(sp)
@@ -1177,6 +1277,30 @@ read_text_file:
 	tst.l	d0
 	bmi	error_file_2
 
+	cmpi.l	#HEADER_SIZE,file_size(a6)
+	blt	error_file_5
+	movea.l	text_point(a6),a0
+	lea.l	text_image_header(pc),a1
+	cmpm.b	(a1)+,(a0)+
+	bne	error_file_5
+	cmpm.b	(a1)+,(a0)+
+	bne	error_file_5
+	cmpm.b	(a1)+,(a0)+
+	bne	error_file_5
+	cmpi.b	#DATA_KIND_NORMAL,(a0)
+	bne	@f
+	cmpi.l	#128*512*3+HEADER_SIZE,file_size(a6)
+	bne	error_file_5
+	bra	read_text_file_close
+@@:	cmpi.b	#DATA_KIND_FS,(a0)
+	beq	@f
+	cmpi.b	#DATA_KIND_FS_GS,(a0)
+	beq	@f
+	bra	error_file_5
+@@:	cmp.l	#128*512*4+HEADER_SIZE,file_size(a6)
+	bne	error_file_5
+
+read_text_file_close:
 	move.w	d1,-(sp)
 	DOS	_CLOSE
 	addq.l	#2,sp
@@ -1309,40 +1433,65 @@ mfree:
 
 *-----------------------------------------------
 *
+*	プログラム名の表示
+*
+*-----------------------------------------------
+print_name:
+	movem.l	d0/a0-a1,-(sp)
+	lea.l	print_name_work(pc),a0
+	tst.w	(a0)
+	bne	@f
+	PRINT	m_name
+	lea.l	print_name_work(pc),a0
+	move.w	#1,(a0)
+@@:	movem.l	(sp)+,d0/a0-a1
+	rts
+
+print_name_work:
+	dc.w	0
+
+*-----------------------------------------------
+*
 *	エラー処理
 *
 *-----------------------------------------------
 error_file_1:
-	lea.l	m_file_1(pc),a1
+	bsr	print_name
+	lea.l	m_error_file_1(pc),a1
 	bra	error_exit
 error_file_2:
-	lea.l	m_file_2(pc),a1
+	bsr	print_name
+	lea.l	m_error_file_2(pc),a1
 	bra	error_exit
 error_file_3:
-	lea.l	m_file_3(pc),a1
+	bsr	print_name
+	lea.l	m_error_file_3(pc),a1
 	bra	error_exit
 error_file_4:
-	lea.l	m_file_4(pc),a1
+	bsr	print_name
+	lea.l	m_error_file_4(pc),a1
 	bra	error_exit
 error_file_5:
-	lea.l	m_file_5(pc),a1
+	bsr	print_name
+	lea.l	m_error_file_5(pc),a1
 	bra	error_exit
 error_memory:
-	lea.l	m_memory(pc),a1
+	bsr	print_name
+	lea.l	m_error_memory(pc),a1
 	bra	error_exit
 error_picload:
-	lea.l	m_picload(pc),a1
+	bsr	print_name
+	lea.l	m_error_picload(pc),a1
 	bra	error_exit
 error_piccolor:
-	lea.l	m_piccolor(pc),a1
+	bsr	print_name
+	lea.l	m_error_piccolor(pc),a1
 	bra	error_exit
 help:
+	bsr	print_name
 	lea.l	m_usage(pc),a1
 *	bra	error_exit
 error_exit:
-	move.l	a1,-(sp)
-	PRINT	m_name
-	move.l	(sp)+,a1
 	IOCS	_B_PRINT
 	bsr	finalize
 	movea.l	ssp_work(a6),a1
@@ -1351,34 +1500,85 @@ error_exit:
 	DOS	_EXIT2
 
 m_name:
-	dc.b	"PIC to Text converter 'PIC2TXT.R' version 1.00",13,10
+	dc.b	"PIC to text image converter 'PIC2TXT.R' version 1.01",13,10
 	dc.b	'Programmed by M.Taguchi.',13,10,0
 m_usage:
 	dc.b	'Usage: PIC2TXT -[switch] <pic-file-path>',13,10
-	dc.b	'    -D テキスト画像の直接ロード(default)',13,10
 	dc.b	'    -L <text-file-path> テキスト画像の読み込み',13,10
 	dc.b	'    -S <text-file-path> テキスト画像の書き込み',13,10
-	dc.b	'    -F Floyd Steinberg法使用(未完成)',13,10,0
-m_file_1:
-	dc.b	'ファイルが見付かりません',13,10,0
-m_file_2:
-	dc.b	'ファイルが読めません',13,10,0
-m_file_3:
-	dc.b	'ファイルが作成出来ません',13,10,0
-m_file_4:
-	dc.b	'ファイルが書き込めません',13,10,0
-m_file_5:
-	dc.b	'テキスト画像ファイルではありません',13,10,0
-m_memory:
-	dc.b	'メモリが足りません',13,10,0
+	dc.b	'    -F Floyd Steinberg法使用',13,10
+	dc.b	'    -G Floyd Steinberg法使用(グレースケール)',13,10,0
 m_picload:
+	dc.b	'PICファイルのロード中です...',13,10,0
+m_convert:
+	dc.b	'テキスト画像に変換中です...',13,10,0
+m_convert_finish:
+	dc.b	'完了しました',13,10,0
+m_error_file_1:
+	dc.b	'ファイルが見付かりません',13,10,0
+m_error_file_2:
+	dc.b	'ファイルが読めません',13,10,0
+m_error_file_3:
+	dc.b	'ファイルが作成出来ません',13,10,0
+m_error_file_4:
+	dc.b	'ファイルが書き込めません',13,10,0
+m_error_file_5:
+	dc.b	'テキスト画像ファイルではありません',13,10,0
+m_error_memory:
+	dc.b	'メモリが足りません',13,10,0
+m_error_picload:
 	dc.b	'PICファイルのロードに失敗しました',13,10,0
-m_piccolor:
+m_error_piccolor:
 	dc.b	'PICファイルが32K色、または64K色の形式ではありません',13,10,0
+	.even
+r_colors:
+	dc.w	$00, $00, $00, $00, $1F, $1F, $1F, $1F, $0F, $19, $14, $06, $00, $10, $09, $0F
+g_colors:
+	dc.w	$00, $00, $1F, $1F, $00, $00, $1F, $1F, $00, $0C, $05, $18, $0C, $19, $09, $00
+b_colors:
+	dc.w	$00, $1F, $00, $1F, $00, $1F, $00, $1F, $00, $03, $05, $06, $00, $1E, $1E, $0F
+r_gray_colors:
+	dc.w	$00, $02, $04, $06, $08, $0A, $0C, $0E, $10, $12, $14, $16, $18, $1A, $1C, $1F
+g_gray_colors:
+	dc.w	$00, $02, $04, $06, $08, $0A, $0C, $0E, $10, $12, $14, $16, $18, $1A, $1C, $1F
+b_gray_colors:
+	dc.w	$00, $02, $04, $06, $08, $0A, $0C, $0E, $10, $12, $14, $16, $18, $1A, $1C, $1F
+text_table:
+	dc.l	%00000000_00000000_00000000_00000000
+	dc.l	%00000000_00000000_00000000_10000000
+	dc.l	%00000000_00000000_10000000_00000000
+	dc.l	%00000000_00000000_10000000_10000000
+	dc.l	%00000000_10000000_00000000_00000000
+	dc.l	%00000000_10000000_00000000_10000000
+	dc.l	%00000000_10000000_10000000_00000000
+	dc.l	%00000000_10000000_10000000_10000000
+	dc.l	%10000000_00000000_00000000_00000000
+	dc.l	%10000000_00000000_00000000_10000000
+	dc.l	%10000000_00000000_10000000_00000000
+	dc.l	%10000000_00000000_10000000_10000000
+	dc.l	%10000000_10000000_00000000_00000000
+	dc.l	%10000000_10000000_00000000_10000000
+	dc.l	%10000000_10000000_10000000_00000000
+	dc.l	%10000000_10000000_10000000_10000000
+square_table:
+	dc.w	961, 900, 841, 784, 729, 676, 625, 576
+	dc.w	529, 484, 441, 400, 361, 324, 289, 256
+	dc.w	225, 196, 169, 144, 121, 100, 81, 64
+	dc.w	49, 36, 25, 16, 9, 4, 1, 0
+	dc.w	1, 4, 9, 16, 25, 36, 49, 64
+	dc.w	81, 100, 121, 144, 169, 196, 225, 256
+	dc.w	289, 324, 361, 400, 441, 484, 529, 576
+	dc.w	625, 676, 729, 784, 841, 900, 961
+
+text_image_header:
+	dc.b	'P2T'
+text_image_header_kind:
+	dc.b	DATA_KIND_NORMAL
 
 	.even
 work_top:
 	ds.b	WORK_SIZE
+	.even
 mystack:
 	ds.l	1024
 mysp:
