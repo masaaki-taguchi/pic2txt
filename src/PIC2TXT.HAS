@@ -1,5 +1,5 @@
 *
-*	PIC to text image converter 'PIC2TXT.R' version 1.01
+*	PIC to text image converter 'PIC2TXT.R' version 1.02
 *
 *	Programmed by M.Taguchi.
 *
@@ -59,9 +59,6 @@ diffusion_work_2:	ds.b	1024+2
 diffusion_work_r:	ds.l	(512+2)*2
 diffusion_work_g:	ds.l	(512+2)*2
 diffusion_work_b:	ds.l	(512+2)*2
-r_work:			ds.w	1
-g_work:			ds.w	1
-b_work:			ds.w	1
 text_write_counter:	ds.w	1
 selected_palette	ds.w	1
 text_bit_table		ds.l	16*8
@@ -688,6 +685,7 @@ next_line_loop:
 	lea.l	diffusion_work_b(a6),a4
 	clr.w	text_write_counter(a6)
 next_dot_loop:
+	movem.l	d5-d7,-(sp)
 	move.w	(a0)+,d0
 	move.w	d0,d1			*R
 	lsr.w	#6,d1
@@ -699,7 +697,7 @@ next_dot_loop:
 @@:	tst.w	d1
 	bpl	@f
 	moveq.l	#0,d1
-@@:	move.w	d1,r_work(a6)
+@@:	move.w	d1,d5
 
 	move.w	d0,d1			*G
 	rol.w	#5,d1
@@ -711,7 +709,7 @@ next_dot_loop:
 @@:	tst.w	d1
 	bpl	@f
 	moveq.l	#0,d1
-@@:	move.w	d1,g_work(a6)
+@@:	move.w	d1,d6
 
 	move.w	d0,d1			*B
 	lsr.w	#1,d1
@@ -723,33 +721,30 @@ next_dot_loop:
 @@:	tst.w	d1
 	bpl	@f
 	moveq.l	#0,d1
-@@:	move.w	d1,b_work(a6)
+@@:	move.w	d1,d7
 
 	move.w	#(31*31*3)+1,d3
 	moveq.l	#0,d4
 	move.l	r_colors_adr(a6),a5
 	move.l	a0,d2
-	lea.l	square_table(pc),a0
+	lea.l	square_table_center(pc),a0
 find_closest_palette:
-	move.w	r_work(a6),d0
+	move.w	d5,d0
 	sub.w	(a5,d4),d0
-	add.w	#$1f,d0
 	add.w	d0,d0
 	move.w	(a0,d0.w),d1
-	move.w	g_work(a6),d0
+	move.w	d6,d0
 	sub.w	32(a5,d4),d0
-	add.w	#$1f,d0
 	add.w	d0,d0
 	add.w	(a0,d0.w),d1
-	move.w	b_work(a6),d0
+	move.w	d7,d0
 	sub.w	64(a5,d4),d0
-	add.w	#$1f,d0
 	add.w	d0,d0
 	add.w	(a0,d0.w),d1
 
 	cmp.w	d1,d3
 	ble	@f
-	move.l	d1,d3
+	move.w	d1,d3
 	move.w	d4,selected_palette(a6)
 @@:	addq.w	#2,d4
 	cmpi.w	#32,d4
@@ -757,14 +752,15 @@ find_closest_palette:
 	move.l	d2,a0
 
 	move.w	selected_palette(a6),d4
-	move.w	r_work(a6),d0
+	move.w	d5,d0
 	move.l	r_colors_adr(a6),a5
 	sub.w	(a5,d4),d0
-	move.w	g_work(a6),d1
+	move.w	d6,d1
 	sub.w	32(a5,d4),d1
-	move.w	b_work(a6),d2
+	move.w	d7,d2
 	sub.w	64(a5,d4),d2
 
+	movem.l	(sp)+,d5-d7
 	tst.w	d6
 	beq	@f		*X = 511�̏ꍇ
 	moveq.l	#0,d3
@@ -1500,7 +1496,7 @@ error_exit:
 	DOS	_EXIT2
 
 m_name:
-	dc.b	"PIC to text image converter 'PIC2TXT.R' version 1.01",13,10
+	dc.b	"PIC to text image converter 'PIC2TXT.R' version 1.02",13,10
 	dc.b	'Programmed by M.Taguchi.',13,10,0
 m_usage:
 	dc.b	'Usage: PIC2TXT -[switch] <pic-file-path>',13,10
@@ -1564,7 +1560,9 @@ square_table:
 	dc.w	961, 900, 841, 784, 729, 676, 625, 576
 	dc.w	529, 484, 441, 400, 361, 324, 289, 256
 	dc.w	225, 196, 169, 144, 121, 100, 81, 64
-	dc.w	49, 36, 25, 16, 9, 4, 1, 0
+	dc.w	49, 36, 25, 16, 9, 4, 1
+square_table_center:
+	dc.w	0
 	dc.w	1, 4, 9, 16, 25, 36, 49, 64
 	dc.w	81, 100, 121, 144, 169, 196, 225, 256
 	dc.w	289, 324, 361, 400, 441, 484, 529, 576
